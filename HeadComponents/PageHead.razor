@@ -1,0 +1,35 @@
+﻿@using Microsoft.AspNetCore.Components.Rendering
+
+<div style="display:none;" @ref="ContentRef">@ChildContent</div>
+
+@code {
+    private ElementReference ContentRef;
+
+    [Parameter]
+    public RenderFragment ChildContent { get; set; }
+
+    [CascadingParameter]
+    public PageHeadManager HeadManager { get; set; }
+
+    /// <summary>
+    /// The value to set the page title to. This will override the value derived from the route path and prepended to the configured suffix.
+    /// </summary>
+    [Parameter]
+    public string Title { get; set; }
+
+    protected override void  OnInitialized()
+    {
+        if (HeadManager == null)
+        {
+            throw new InvalidOperationException("PageHeadManager component not found. Please ensure you wrap your app's Router component with the PageHeadManager component.");
+        }
+
+        HeadManager.Title = Title;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await base.OnAfterRenderAsync(firstRender);
+        await HeadManager.ProcessHeadContent(ContentRef);
+    }
+}

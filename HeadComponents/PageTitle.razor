@@ -1,0 +1,127 @@
+﻿@using Microsoft.Extensions.Logging
+@inject NavigationManager NavigationManager
+@inject Microsoft.JSInterop.IJSRuntime JSRuntime
+@inject Microsoft.Extensions.Logging.ILogger<PageTitle> Logger
+@implements IDisposable
+
+<CascadingValue Value="this">
+    @ChildContent
+</CascadingValue>
+
+@code {
+    [Parameter]
+    public RenderFragment ChildContent { get; set; }
+
+    /// <summary>
+    /// The value to append to the page title.
+    /// </summary>
+    [Parameter]
+    public string Suffix { get; set; }
+
+    private bool _initialRenderComplete;
+    private string _currentLocation;
+    private IJSObjectReference _jsModule;
+
+    private string _pageTitle;
+
+    /// <summary>
+    /// The value to set the page title to. This will override the value derived from the route path and prepended to the configured suffix.
+    /// </summary>
+    public string Title
+    {
+        get => _pageTitle;
+        set
+        {
+            Logger.LogDebug("Page title '{title}' set via property. Existing value was '{existingTitle}'", value, _pageTitle);
+            if (_pageTitle != value)
+            {
+                _pageTitle = value;
+                if (_initialRenderComplete)
+                {
+                    _ = UpdateTitle(value);
+                }
+                else
+                {
+                    Logger.LogDebug("Initial render not yet complete, deferring updating of page title");
+                }
+            }
+        }
+    }
+
+    protected override void OnInitialized()
+    {
+        _currentLocation = NavigationManager.Uri;
+        NavigationManager.LocationChanged += LocationChanged;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+
+        _initialRenderComplete = true;
+        Logger.LogDebug("OnAfterRenderAsync");
+
+        if (firstRender)
+        {
+            _jsModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", "./_content/HeadComponents/jsFunctions.js");
+
+            if (string.IsNullOrEmpty(_pageTitle))
+            {
+                Logger.LogDebug("Setting page initial title from location");
+                await UpdatePageTitleFromLocation(NavigationManager.Uri);
+            }
+            else
+            {
+                Logger.LogDebug($"Setting page initial title from '{nameof(Title)}' property value");
+                await UpdateTitle(_pageTitle);
+            }
+
+            Logger.LogDebug("Initial render complete");
+        }
+    }
+
+    public void Dispose()
+    {
+        NavigationManager.LocationChanged -= LocationChanged;
+    }
+
+    private async void LocationChanged(object sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
+    {
+        Logger.LogDebug("Location change event fired");
+
+        if (!string.Equals(_currentLocation, e.Location))
+        {
+            Logger.LogDebug("Location change detected. Previous location was '{previous}', new location is '{new}'", _currentLocation, e.Location);
+
+            var currentUri = new Uri(_currentLocation);
+            var newUri = new Uri(e.Location);
+
+            if (Uri.Compare(currentUri, newUri, UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) != 0)
+            {
+                _pageTitle = null;
+                _currentLocation = e.Location;
+                Logger.LogDebug("Updating page title due to location change");
+                await UpdatePageTitleFromLocation(e.Location);
+            }
+            else
+            {
+                Logger.LogDebug("New location URL server and path are the same as previous location's, skipping page title udpate");
+            }
+        }
+    }
+
+    private async Task UpdatePageTitleFromLocation(string location)
+    {
+        Logger.LogDebug("Updating page title from location '{location}'", location);
+        var title = new Uri(location).Segments.Last();
+        await UpdateTitle(title);
+    }
+
+    private async Task UpdateTitle(string title)
+    {
+        Logger.LogDebug("Updating page title to '{title}' via JSRuntime", title);
+
+        await _jsModule.InvokeVoidAsync("setDocumentTitle", $"{title}{Suffix}");
+
+        Logger.LogDebug("Page title updated to '{title}' via JSRuntime", title);
+    }
+}
