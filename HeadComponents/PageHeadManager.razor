@@ -33,7 +33,8 @@
         get => _pageTitle;
         set
         {
-            Logger.LogDebug("Page title '{title}' set via property. Existing value was '{existingTitle}'", value, _pageTitle);
+            LoggerDefines.HeadManagerTitle(Logger, value, _pageTitle);
+            //Logger.LogDebug("Page title '{title}' set via property. Existing value was '{existingTitle}'", value, _pageTitle);
             if (_pageTitle != value)
             {
                 _pageTitle = value;
