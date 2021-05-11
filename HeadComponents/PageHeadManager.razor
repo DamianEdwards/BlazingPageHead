@@ -1,8 +1,10 @@
 ﻿@using Microsoft.Extensions.Logging
+@using System.Threading
+@using System.Diagnostics
 @inject NavigationManager NavigationManager
 @inject Microsoft.JSInterop.IJSRuntime JSRuntime
-@inject Microsoft.Extensions.Logging.ILogger<PageHeadManager> Logger
-@implements IDisposable
+@inject ILogger<PageHeadManager> Logger
+@implements IAsyncDisposable
 
 <CascadingValue Value="this">
     @ChildContent
@@ -21,99 +23,53 @@
     private bool _initialRenderComplete;
     private string _currentLocation;
     private IJSObjectReference _jsModule;
-
-    private string _pageTitle;
     private ElementReference? _headContentRef;
+    private TaskQueue _pageHeadUpdatesQueue;
 
-    /// <summary>
-    /// The value to set the page title to. This will override the value derived from the route path and prepended to the configured suffix.
-    /// </summary>
-    internal string Title
+    protected override void OnInitialized()
     {
-        get => _pageTitle;
-        set
+        Logger.LogDebug("OnInitialized");
+        _pageHeadUpdatesQueue = new TaskQueue();
+        _currentLocation = NavigationManager.Uri;
+        NavigationManager.LocationChanged += LocationChanged;
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        Logger.LogDebug("OnAfterRenderAsync(firstRender: {firstRender})", firstRender);
+
+        EnsureJsModule();
+
+        _initialRenderComplete = true;
+
+        UpdatePageTitleFromLocation(_currentLocation);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        NavigationManager.LocationChanged -= LocationChanged;
+
+        if (_jsModule != null)
         {
-            Logger.LogDebug("Page title '{title}' set via property. Existing value was '{existingTitle}'", value, _pageTitle);
-            if (_pageTitle != value)
-            {
-                _pageTitle = value;
-                if (_initialRenderComplete)
-                {
-                    _ = UpdateTitle(value);
-                }
-                else
-                {
-                    Logger.LogDebug("Initial render not yet complete, deferring updating of page title");
-                }
-            }
+            await _jsModule.DisposeAsync();
         }
     }
 
-    internal async Task ProcessHeadContent(ElementReference headContentRef)
+    internal void ProcessHeadContent(ElementReference headContentRef)
     {
         Logger.LogDebug("Page head content being processed");
 
         _headContentRef = headContentRef;
 
-        if (_initialRenderComplete)
+        if (!_initialRenderComplete)
         {
-            await UpdatePageHeadContent();
+            throw new InvalidOperationException($"{nameof(ProcessHeadContent)} called before initial rendering is complete. This should never happen and likely indicates a race condition.");
         }
-        else
-        {
-            Logger.LogDebug("Initial render not yet complete, deferring updating of page head content");
-        }
+
+        UpdatePageHeadContent();
     }
 
-    protected override void OnInitialized()
-    {
-        _currentLocation = NavigationManager.Uri;
-        NavigationManager.LocationChanged += LocationChanged;
-    }
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-
-        _initialRenderComplete = true;
-        Logger.LogDebug("OnAfterRenderAsync");
-
-        if (firstRender)
-        {
-            if (string.IsNullOrEmpty(_pageTitle))
-            {
-                Logger.LogDebug("Setting page initial title from location");
-                await UpdatePageTitleFromLocation(NavigationManager.Uri);
-            }
-            else
-            {
-                Logger.LogDebug($"Setting page initial title from '{nameof(Title)}' property value");
-                await UpdateTitle(_pageTitle);
-            }
-
-            if (_headContentRef != null)
-            {
-                Logger.LogDebug($"Setting page head initial content");
-                await UpdatePageHeadContent();
-            }
-
-            Logger.LogDebug("Initial render complete");
-        }
-    }
-
-    public void Dispose()
-    {
-        NavigationManager.LocationChanged -= LocationChanged;
-    }
-
-    private async Task EnsureJsModule()
-    {
-        if (_jsModule == null)
-        {
-            _jsModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", "./_content/HeadComponents/jsFunctions.js");
-        }
-    }
-
-    private async void LocationChanged(object sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
+    private void LocationChanged(object sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
     {
         Logger.LogDebug("Location change event fired");
 
@@ -126,45 +82,41 @@
 
             if (Uri.Compare(currentUri, newUri, UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) != 0)
             {
-                _pageTitle = null;
                 _currentLocation = e.Location;
                 Logger.LogDebug("Updating page title due to location change");
-                await ResetPageHead();
-                await UpdatePageTitleFromLocation(e.Location);
+                UpdatePageTitleFromLocation(e.Location);
             }
             else
             {
-                Logger.LogDebug("New location URL server and path are the same as previous location's, skipping page title udpate");
+                Logger.LogDebug("New location's URL server and path are the same as previous location's, skipping page title udpate");
             }
         }
     }
 
-    private async Task ResetPageHead()
-    {
-        await EnsureJsModule();
-        await _jsModule.InvokeVoidAsync("resetHead");
-    }
-
-    private async Task UpdatePageTitleFromLocation(string location)
+    private void UpdatePageTitleFromLocation(string location)
     {
         Logger.LogDebug("Updating page title from location '{location}'", location);
-        var title = new Uri(location).Segments.Last();
-        await UpdateTitle(title);
-    }
+        var title = new Uri(location).Segments.Last() + Suffix;
 
-    private async Task UpdateTitle(string title)
-    {
-        Logger.LogDebug("Updating page title to '{title}' via JSRuntime", title);
-
-        await EnsureJsModule();
-        await _jsModule.InvokeVoidAsync("setDocumentTitle", $"{title}{Suffix}");
+        var _ = _pageHeadUpdatesQueue.Enqueue(() => _jsModule.InvokeVoidAsync("resetHead", $"{title}"));
 
         Logger.LogDebug("Page title updated to '{title}' via JSRuntime", title);
     }
 
-    private async Task UpdatePageHeadContent()
+    private async void UpdatePageHeadContent()
     {
-        await EnsureJsModule();
-        await _jsModule.InvokeVoidAsync("processHeadContent", _headContentRef.Value, Suffix);
+        var title = await _pageHeadUpdatesQueue.Enqueue(() => _jsModule.InvokeAsync<string>("processHeadContent", _headContentRef.Value, Suffix));
+        if (title != null)
+        {
+            Logger.LogDebug("Page title '{title}' was present in page head content", title);
+        }
+    }
+
+    private async void EnsureJsModule()
+    {
+        if (_jsModule == null)
+        {
+            _jsModule = await _pageHeadUpdatesQueue.Enqueue(() => JSRuntime.InvokeAsync<IJSObjectReference>("import", "./_content/HeadComponents/jsFunctions.js"));
+        }
     }
 }

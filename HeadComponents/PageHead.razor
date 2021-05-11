@@ -1,4 +1,6 @@
 ﻿@using Microsoft.AspNetCore.Components.Rendering
+@using Microsoft.Extensions.Logging
+@inject ILogger<PageHead> Logger
 
 <div style="display:none;" @ref="ContentRef">@ChildContent</div>
 
@@ -11,25 +13,19 @@
     [CascadingParameter]
     public PageHeadManager HeadManager { get; set; }
 
-    /// <summary>
-    /// The value to set the page title to. This will override the value derived from the route path and prepended to the configured suffix.
-    /// </summary>
-    [Parameter]
-    public string Title { get; set; }
-
-    protected override void  OnInitialized()
+    protected override void OnInitialized()
     {
+        Logger.LogDebug("OnInitialized");
+
         if (HeadManager == null)
         {
-            throw new InvalidOperationException("PageHeadManager component not found. Please ensure you wrap your app's Router component with the PageHeadManager component.");
+            throw new InvalidOperationException($"{nameof(PageHeadManager)} component not found. Please ensure you wrap your app's {nameof(Router)} component with the {nameof(PageHeadManager)} component.");
         }
-
-        HeadManager.Title = Title;
     }
 
-    protected override async Task OnAfterRenderAsync(bool firstRender)
+    protected override void OnAfterRender(bool firstRender)
     {
-        await base.OnAfterRenderAsync(firstRender);
-        await HeadManager.ProcessHeadContent(ContentRef);
+        Logger.LogDebug("OnAfterRenderAsync(firstRender: {firstRender})", firstRender);
+        HeadManager.ProcessHeadContent(ContentRef);
     }
 }
